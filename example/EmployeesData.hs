@@ -19,7 +19,7 @@ data EmployeeT f = Employee
                  , _employeeLastName   :: Columnar f Text
                  , _employeeGroup      :: PrimaryKey GroupT f
 
-                 , _employeePosition   :: Columnar f Position }
+                 , _employeePos   :: Columnar f Position }
                  deriving (Generic)
 
 data DepartmentT f = Department

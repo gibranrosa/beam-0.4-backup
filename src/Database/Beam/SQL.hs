@@ -1,12 +1,15 @@
 {-# OPTIONS_GHC -fwarn-incomplete-patterns #-}
 module Database.Beam.SQL
     ( -- * SQL pretty printing
-      ppSQL
+      ppSQLGen
 
       -- * Untyped SQL types
-    , module Database.Beam.SQL.Types ) where
+    , module Database.Beam.SQL.Types
+    , (<+>) , (<>), empty, text
+    , SQL(..) ) where
 
 import Database.Beam.SQL.Types
+import Database.Beam.Internal (BeamBackend)
 
 import Control.Arrow hiding ((<+>))
 import Control.Monad.Writer hiding ((<>))
@@ -21,207 +24,217 @@ import Text.PrettyPrint
 
 -- | Convert a 'SQLCommand' into a SQL expression (with placeholders) and literal values to be submitted to the SQL server.
 --   Splitting into a SQL expression and literals prevents SQL injection attacks.
-ppSQL :: SQLCommand -> (String, [SqlValue])
-ppSQL c = first render (runWriter (ppCmd c))
 
 type DocAndVals = Writer [SqlValue] Doc
 
-ppCmd :: SQLCommand -> DocAndVals
-ppCmd (Select sel) = ppSel sel
-ppCmd (CreateTable ct) = ppCreateTable ct
-ppCmd (Insert i) = ppInsert i
-ppCmd (Update u) = ppUpdate u
-ppCmd (Delete d) = ppDelete d
+ppJType :: Applicative f => SQLJoinType -> f Doc
+ppJType SQLInnerJoin = pure (text "INNER JOIN")
+ppJType SQLLeftJoin =  pure (text "LEFT JOIN")
+ppJType SQLRightJoin = pure (text "RIGHT JOIN")
+ppJType SQLOuterJoin = pure (text "OUTER JOIN")
+ppJType SQLCrossJoin = pure (text "CROSS JOIN")
 
--- ** Create table printing support
+ppSQLGen :: SQL backend => backend -> SQLCommand -> (String, [SqlValue])
+ppSQLGen b c = 
+  first render (runWriter (ppCmd c))
+  where
+    ppCmd :: SQLCommand -> DocAndVals
+    ppCmd (Select sel) = ppSel b sel
+    ppCmd (CreateTable ct) = ppCreateTable b ct
+    ppCmd (Insert i) = ppInsert b i
+    ppCmd (Update u) = ppUpdate b u
+    ppCmd (Delete d) = ppDelete d
+    
+      -- ** Delete printing support
 
-ppCreateTable :: SQLCreateTable -> DocAndVals
-ppCreateTable (SQLCreateTable tblName schema) =
-    do fieldSchemas <- mapM ppFieldSchema schema
-       let primaryKeys = filter (elem SQLPrimaryKey . csConstraints . snd) schema
-           primaryKeyExpr = case primaryKeys of
-                              [] -> []
-                              keys ->
-                                  let pks = map (text . unpack . fst) keys
-                                  in [text "PRIMARY KEY(" <+> hsep (punctuate comma pks) <+> text ")" ]
-       return (text "CREATE TABLE" <+> text (unpack tblName) <+> parens (hsep (punctuate comma (fieldSchemas ++ primaryKeyExpr))))
-
-ppFieldSchema :: (Text, SQLColumnSchema) -> DocAndVals
-ppFieldSchema (name, colSch) = (text (unpack name) <+>) <$> ppColSchema colSch
-
-ppColSchema :: SQLColumnSchema -> DocAndVals
-ppColSchema (SQLColumnSchema type_ constraints) =
-    do typeDoc <- ppColType type_
-       constraints' <- mapM ppConstraint constraints
-       return (typeDoc <+> hsep constraints')
-
-ppConstraint :: SQLConstraint -> DocAndVals
-ppConstraint SQLPrimaryKey = return empty --(text "PRIMARY KEY")
---ppConstraint SQLPrimaryKeyAutoIncrement = return (text "PRIMARY KEY")
-ppConstraint SQLAutoIncrement = return (text "AUTOINCREMENT") -- TODO this is different dependingon the backend
-ppConstraint SQLNotNull = return (text "NOT NULL")
-
-ppColType :: SqlColDesc -> DocAndVals
-ppColType SqlColDesc { colType = SqlVarCharT
-                     , colSize = size } =
-    return
-      (text "VARCHAR" <+>
-            case size of
-              Nothing -> empty
-              Just sz -> parens (text (show sz)))
-ppColType SqlColDesc { colType = SqlCharT
-                     , colSize = size } =
-    return
-      (text "CHAR" <+>
-            case size of
-              Nothing -> empty
-              Just sz -> parens (text (show sz)))
-ppColType SqlColDesc { colType = SqlNumericT } = return (text "INTEGER")
-ppColType SqlColDesc { colType = SqlUTCDateTimeT } = return (text "DATETIME")
-
--- ** Insert printing support
-
-ppInsert :: SQLInsert -> DocAndVals
-ppInsert (SQLInsert tblName values) =
-    do vals <- mapM ppVal values
-       return (text "INSERT INTO" <+> text (unpack tblName) <+> text "VALUES" <+>
-               parens (hsep (punctuate comma vals)))
-
--- ** Update printing support
-
-ppAssignment :: SQLFieldName -> SQLExpr -> DocAndVals
-ppAssignment field expr =
-    do fieldD <- ppFieldName field
-       exprD  <- ppExpr expr
-       return (fieldD <> text "=" <> exprD)
-
-ppUpdate :: SQLUpdate -> DocAndVals
-ppUpdate (SQLUpdate tbls assignments where_) =
-    do assignmentsDs <- mapM (uncurry ppAssignment) assignments
-       whereClause_  <- case where_ of
-                          Nothing -> return empty
-                          Just x -> ppWhere x
-       return (text "UPDATE" <+> hsep (punctuate comma (map (text . unpack) tbls)) <+>
-               text "SET"    <+> hsep (punctuate comma assignmentsDs) <+>
-               whereClause_)
-
--- ** Delete printing support
-
-ppDelete :: SQLDelete -> DocAndVals
-ppDelete (SQLDelete tbl where_) =
-    do whereClause_ <- case where_ of
-                         Nothing -> return empty
-                         Just x -> ppWhere x
-       return (text "DELETE FROM" <+> text (unpack tbl) <+> whereClause_)
-
--- ** Select printing support
-
-ppSel :: SQLSelect -> DocAndVals
-ppSel sel =
-    do proj   <- ppProj (selProjection sel)
-       source <- case selFrom sel of
-                   Nothing -> pure empty
-                   Just from -> do source <- ppFrom from
-                                   pure (text "FROM " <+> source)
-       where_ <- ppWhere  (selWhere sel)
-       grouping <- case selGrouping sel of
-                     Nothing -> return empty
-                     Just grouping -> ppGrouping grouping
-       orderBy <- ppOrderBy (selOrderBy sel)
-       let limit = maybe empty ((text "LIMIT" <+>) . text . show) (selLimit sel)
-           offset = maybe empty ((text "OFFSET" <+>) . text . show) (selOffset sel)
-       return (text "SELECT" <+> proj <+> source <+>
-               where_ <+> grouping <+> orderBy <+> limit <+> offset)
-
-ppProj :: SQLProjection -> DocAndVals
-ppProj SQLProjStar = return (text "*")
-ppProj (SQLProj es) =
-    do es' <- mapM (ppAliased ppExpr) es
-       return (hsep (punctuate comma es'))
+    ppDelete :: SQLDelete -> DocAndVals
+    ppDelete (SQLDelete tbl where_) =
+        do whereClause_ <- case where_ of
+                             Nothing -> return empty
+                             Just x -> ppWhere b x
+           return (text "DELETE FROM" <+> text (unpack tbl) <+> whereClause_)
 
 ppAliased :: (a -> DocAndVals) -> SQLAliased a -> DocAndVals
 ppAliased ppSub (SQLAliased x (Just as)) = do sub <- ppSub x
                                               return (sub <+> text "AS" <+> text (unpack as))
 ppAliased ppSub (SQLAliased x Nothing) = ppSub x
 
-ppSource :: SQLSource -> DocAndVals
-ppSource (SQLSourceTable tbl) = return (text (unpack tbl))
-ppSource (SQLSourceSelect sel) = parens <$> ppSel sel
-
-ppWhere :: SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
-ppWhere (SQLValE v)
-    | safeFromSql v == Right True = return empty
-ppWhere expr = (text "WHERE" <+>) <$> ppExpr expr
-
-ppFieldName :: Applicative f => SQLFieldName -> f Doc
-ppFieldName (SQLQualifiedFieldName t table) = pure (text "`" <> text (unpack table) <> text "`.`" <>
-                                                     text (unpack t) <> text "`")
-ppFieldName (SQLFieldName t) = pure (text (unpack t))
-
-ppGrouping :: SQLGrouping -> Writer [SqlValue] Doc
-ppGrouping grouping = do exprs <- mapM ppExpr (sqlGroupBy grouping)
-                         having <-  ppHaving (sqlHaving grouping)
-                         return (text "GROUP BY" <+> hsep (punctuate comma exprs) <+> having)
-
-ppHaving :: SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
-ppHaving (SQLValE v)
-         | safeFromSql v == Right True = return empty
-ppHaving expr = (text "HAVING" <+>) <$> ppExpr expr
-
-ppFrom :: SQLFrom -> Writer [SqlValue] Doc
-ppFrom x = fst <$> ppFrom' x
-
-ppFrom' :: SQLFrom -> Writer [SqlValue] (Doc, Bool)
-ppFrom' (SQLFromSource a) = (,False) <$> ppAliased ppSource a
-ppFrom' (SQLJoin jType x y on_) = do (xDoc, _) <- ppFrom' x
-                                     jTypeDoc <- ppJType jType
-                                     (yDoc, yIsJoin) <- ppFrom' y
-                                     onDoc <- ppOn on_
-                                     return (xDoc <+> jTypeDoc <+> if yIsJoin then yDoc else yDoc <+> onDoc, True)
-ppJType :: Applicative f => SQLJoinType -> f Doc
-ppJType SQLInnerJoin = pure (text "INNER JOIN")
-ppJType SQLLeftJoin =  pure (text "LEFT JOIN")
-ppJType SQLRightJoin = pure (text "RIGHT JOIN")
-ppJType SQLOuterJoin = pure (text "OUTER JOIN")
-
-ppOn :: SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
-ppOn (SQLValE v)
-     | safeFromSql v == Right True = return empty
-ppOn expr = (text "ON" <+>) <$> ppExpr expr
-
-ppOrderBy :: [SQLOrdering] -> Writer [SqlValue] Doc
-ppOrderBy [] = return empty
-ppOrderBy xs = (text "ORDER BY" <+>) . hsep . punctuate comma <$> mapM ppOrdering xs
-    where ppOrdering (Asc e) = do eDoc <- ppExpr e
-                                  return (eDoc <+> text "ASC")
-          ppOrdering (Desc e) = do eDoc <- ppExpr e
-                                   return (eDoc <+> text "DESC")
-
 ppVal :: SqlValue -> DocAndVals
 ppVal val = tell [val] >> return (text "?")
 
-ppExpr :: SQLExpr -> DocAndVals
-ppExpr (SQLValE v) = ppVal v
-ppExpr (SQLFieldE name) = ppFieldName name
-ppExpr (SQLBinOpE op a b) =
-    do aD <- ppExpr a
-       bD <- ppExpr b
-       return (parens (aD <+> text (unpack op) <+> bD))
-ppExpr (SQLUnOpE op a) = do aDoc <- ppExpr a
-                            return (parens (text (unpack op) <+> parens aDoc))
-ppExpr (SQLIsNothingE q) = do qDoc <- ppExpr q
-                              return (parens (qDoc <+> text "IS NULL"))
-ppExpr (SQLIsJustE q) = do qDoc <- ppExpr q
-                           return (parens (qDoc <+> text "IS NOT NULL"))
-ppExpr (SQLListE xs) = do xsDoc <- mapM ppExpr xs
-                          return (parens (hsep (punctuate comma xsDoc)))
-ppExpr (SQLFuncE f args) = do argDocs <- mapM ppExpr args
-                              return (text (unpack f) <> parens (hsep (punctuate comma argDocs)) )
-ppExpr (SQLExistsE q) = do selectDoc <- ppSel q
-                           pure (parens (text "EXISTS (" <> selectDoc <> text ")"))
-ppExpr (SQLCaseE clauses else_) = do whenClauses <- forM clauses $ \(cond, then_) ->
-                                                    do condDoc <- ppExpr cond
-                                                       thenDoc <- ppExpr then_
-                                                       pure (text "WHEN" <+> condDoc <+> text "THEN" <+> thenDoc)
-                                     elseDoc <- ppExpr else_
-                                     pure (parens (text "CASE" <+> hsep whenClauses <+> text "ELSE" <+> elseDoc <+> text "END"))
+class BeamBackend backend => SQL backend where
+
+  
+  -- ** Create table printing support
+
+  ppCreateTable :: backend -> SQLCreateTable -> DocAndVals
+  ppCreateTable b (SQLCreateTable tblName schema) =
+      do fieldSchemas <- mapM (ppFieldSchema b) schema
+         let primaryKeys = filter (elem SQLPrimaryKey . csConstraints . snd) schema
+             primaryKeyExpr = case primaryKeys of
+                                [] -> []
+                                keys ->
+                                    let pks = map (text . unpack . fst) keys
+                                    in [text "PRIMARY KEY(" <+> hsep (punctuate comma pks) <+> text ")" ]
+         return (text "CREATE TABLE" <+> text (unpack tblName) <+> parens (hsep (punctuate comma (fieldSchemas ++ primaryKeyExpr))))
+
+  ppFieldSchema :: backend -> (Text, SQLColumnSchema) -> DocAndVals
+  ppFieldSchema b (name, colSch) = (text (unpack name) <+>) <$> ppColSchema b colSch
+
+  ppColSchema :: backend -> SQLColumnSchema -> DocAndVals
+  ppColSchema b (SQLColumnSchema type_ constraints) =
+      do typeDoc <- ppColType b type_
+         constraints' <- mapM (ppConstraint b) constraints
+         return (typeDoc <+> hsep constraints')
+
+  ppConstraint :: backend -> SQLConstraint -> DocAndVals
+  ppConstraint _ SQLPrimaryKey = return empty --(text "PRIMARY KEY")
+  --ppConstraint SQLPrimaryKeyAutoIncrement = return (text "PRIMARY KEY")
+  ppConstraint _ SQLAutoIncrement = return (text "AUTOINCREMENT") -- TODO this is different dependingon the backend
+  ppConstraint _ SQLNotNull = return (text "NOT NULL")
+
+  ppColType :: backend -> SqlColDesc -> DocAndVals
+  ppColType _ SqlColDesc { colType = SqlVarCharT
+                         , colSize = size } =
+      return
+        (text "VARCHAR" <+>
+              case size of
+                Nothing -> parens (text "255") --empty
+                Just sz -> parens (text (show sz)))
+  ppColType _ SqlColDesc { colType = SqlCharT
+                       , colSize = size } =
+      return
+        (text "CHAR" <+>
+              case size of
+                Nothing -> parens (text "255")
+                Just sz -> parens (text (show sz)))
+  ppColType _ SqlColDesc { colType = SqlNumericT } = return (text "INTEGER")
+  ppColType _ SqlColDesc { colType = SqlUTCDateTimeT } = return (text "DATETIME")
+  ppColType _  _ = error "ppColType undefined for the type"
+
+  -- ** Insert printing support
+
+  ppInsert :: backend -> SQLInsert -> DocAndVals
+  ppInsert _ (SQLInsert tblName values) =
+      do vals <- mapM ppVal values
+         return (text "INSERT INTO" <+> text (unpack tblName) <+> text "VALUES" <+>
+                 parens (hsep (punctuate comma vals)))
+
+  -- ** Update printing support
+
+  ppAssignment :: backend -> SQLFieldName -> SQLExpr -> DocAndVals
+  ppAssignment b field expr =
+      do fieldD <- ppFieldName b field
+         exprD  <- ppExpr b expr
+         return (fieldD <> text "=" <> exprD)
+
+  ppUpdate :: backend -> SQLUpdate -> DocAndVals
+  ppUpdate b (SQLUpdate tbls assignments where_) =
+      do assignmentsDs <- mapM (uncurry $ ppAssignment b) assignments
+         whereClause_  <- case where_ of
+                            Nothing -> return empty
+                            Just x -> ppWhere b x
+         return (text "UPDATE" <+> hsep (punctuate comma (map (text . unpack) tbls)) <+>
+                 text "SET"    <+> hsep (punctuate comma assignmentsDs) <+>
+                 whereClause_)
+
+  -- ** Select printing support
+
+  ppSel :: backend -> SQLSelect -> DocAndVals
+  ppSel b sel =
+      do proj   <- ppProj b (selProjection sel)
+         source <- case selFrom sel of
+                     Nothing -> pure empty
+                     Just from -> do source <- ppFrom b from
+                                     pure (text "FROM " <+> source)
+         where_ <- ppWhere b (selWhere sel)
+         grouping <- case selGrouping sel of
+                       Nothing -> return empty
+                       Just grouping -> ppGrouping b grouping
+         orderBy <- ppOrderBy b (selOrderBy sel)
+         let limit = maybe empty ((text "LIMIT" <+>) . text . show) (selLimit sel)
+             offset = maybe empty ((text "OFFSET" <+>) . text . show) (selOffset sel)
+         return (text "SELECT" <+> proj <+> source <+>
+                 where_ <+> grouping <+> orderBy <+> limit <+> offset)
+
+  ppProj :: backend -> SQLProjection -> DocAndVals
+  ppProj _ SQLProjStar = return (text "*")
+  ppProj b (SQLProj es) =
+      do es' <- mapM (ppAliased $ ppExpr b) es
+         return (hsep (punctuate comma es'))
+
+  ppSource :: backend -> SQLSource -> DocAndVals
+  ppSource _ (SQLSourceTable tbl) = return (text (unpack tbl))
+  ppSource b (SQLSourceSelect sel) = parens <$> ppSel b sel
+
+  ppWhere :: backend -> SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
+  ppWhere _ (SQLValE v)
+      | safeFromSql v == Right True = return empty
+  ppWhere b expr = (text "WHERE" <+>) <$> ppExpr b expr
+
+  ppFieldName :: Applicative f => backend -> SQLFieldName -> f Doc
+  ppFieldName _ (SQLQualifiedFieldName t table) = pure (text "`" <> text (unpack table) <> text "`.`" <>
+                                                       text (unpack t) <> text "`")
+  ppFieldName _ (SQLFieldName t) = pure (text (unpack t))
+
+  ppGrouping :: backend -> SQLGrouping -> Writer [SqlValue] Doc
+  ppGrouping b grouping = do exprs <- mapM (ppExpr b) (sqlGroupBy grouping)
+                             having <-  ppHaving b (sqlHaving grouping)
+                             return (text "GROUP BY" <+> hsep (punctuate comma exprs) <+> having)
+
+  ppHaving :: backend -> SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
+  ppHaving _ (SQLValE v)
+           | safeFromSql v == Right True = return empty
+  ppHaving b expr = (text "HAVING" <+>) <$> ppExpr b expr
+
+  ppFrom :: backend -> SQLFrom -> Writer [SqlValue] Doc
+  ppFrom b x = fst <$> ppFrom' b x
+
+  ppFrom' :: backend -> SQLFrom -> Writer [SqlValue] (Doc, Bool)
+  ppFrom' b (SQLFromSource a) = (,False) <$> ppAliased (ppSource b) a
+  ppFrom' b (SQLJoin jType x y on_) = do (xDoc, _) <- ppFrom' b x
+                                         jTypeDoc <- ppJType jType
+                                         (yDoc, yIsJoin) <- ppFrom' b y
+                                         onDoc <- ppOn b on_
+                                         return (xDoc <+> jTypeDoc <+> if yIsJoin then yDoc else yDoc <+> onDoc, True)
+
+
+  ppOn :: backend -> SQLExpr' SQLFieldName -> Writer [SqlValue] Doc
+  ppOn _ (SQLValE v)
+       | safeFromSql v == Right True = return empty
+  ppOn b expr = (text "ON" <+>) <$> ppExpr b expr
+
+  ppOrderBy :: backend -> [SQLOrdering] -> Writer [SqlValue] Doc
+  ppOrderBy _ [] = return empty
+  ppOrderBy b xs = (text "ORDER BY" <+>) . hsep . punctuate comma <$> mapM ppOrdering xs
+      where ppOrdering (Asc e) = do eDoc <- ppExpr b e
+                                    return (eDoc <+> text "ASC")
+            ppOrdering (Desc e) = do eDoc <- ppExpr b e
+                                     return (eDoc <+> text "DESC")
+
+  ppExpr :: backend -> SQLExpr -> DocAndVals
+  ppExpr _ (SQLValE v) = ppVal v
+  ppExpr b (SQLFieldE name) = ppFieldName b name
+  ppExpr b (SQLBinOpE op oa ob) =
+      do aD <- ppExpr b oa
+         bD <- ppExpr b ob
+         return (parens (aD <+> text (unpack op) <+> bD))
+  ppExpr b (SQLUnOpE op oa) = do aDoc <- ppExpr b oa
+                                 return (parens (text (unpack op) <+> parens aDoc))
+  ppExpr b (SQLIsNothingE q) = do qDoc <- ppExpr b q
+                                  return (parens (qDoc <+> text "IS NULL"))
+  ppExpr b (SQLIsJustE q) = do qDoc <- ppExpr b q
+                               return (parens (qDoc <+> text "IS NOT NULL"))
+  ppExpr b (SQLListE xs) = do xsDoc <- mapM (ppExpr b) xs
+                              return (parens (hsep (punctuate comma xsDoc)))
+  ppExpr b (SQLFuncE f args) = do argDocs <- mapM (ppExpr b) args
+                                  return (text (unpack f) <> parens (hsep (punctuate comma argDocs)) )
+  ppExpr b (SQLExistsE q) = do selectDoc <- ppSel b q
+                               pure (parens (text "EXISTS (" <> selectDoc <> text ")"))
+  ppExpr b (SQLCaseE clauses else_) = do whenClauses <- forM clauses $ \(cond, then_) ->
+                                                        do condDoc <- ppExpr b cond
+                                                           thenDoc <- ppExpr b then_
+                                                           pure (text "WHEN" <+> condDoc <+> text "THEN" <+> thenDoc)
+                                         elseDoc <- ppExpr b else_
+                                         pure (parens (text "CASE" <+> hsep whenClauses <+> text "ELSE" <+> elseDoc <+> text "END"))
+

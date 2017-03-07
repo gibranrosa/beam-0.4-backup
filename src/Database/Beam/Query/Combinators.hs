@@ -29,7 +29,7 @@ import Database.Beam.Query.Internal
 import Database.Beam.Query.Types
 
 import Database.Beam.Schema.Tables
-import Database.Beam.SQL
+import Database.Beam.SQL hiding ((<>))
 import Database.HDBC
 
 import Control.Monad.State
@@ -166,7 +166,7 @@ class SqlOrd a s where
     a ==. b = not_ (a /=. b)
 
 instance SqlOrd (QExpr s a) s where
-    (==.) = binOpE "=="
+    (==.) = binOpE "="
     (/=.) = binOpE "<>"
 
 newtype QExprBool s a = QExprBool (QExpr s Bool)
@@ -439,7 +439,7 @@ subquery_ (q :: q db (QNested s) a) =
        modify $ \qb@QueryBuilder { qbFrom = from } ->
                  let from' = case from of
                                Nothing -> Just newSource
-                               Just x -> Just (SQLJoin SQLInnerJoin x newSource (SQLValE (SqlBool True)))
+                               Just x -> Just (SQLJoin SQLCrossJoin x newSource (SQLValE (SqlBool True)))
                      newSource = SQLFromSource (SQLAliased (SQLSourceSelect select'') (Just (fromString ("t" <> show curTbl'))))
                  in qb { qbNextTblRef = curTbl' + 1
                        , qbFrom = from' }

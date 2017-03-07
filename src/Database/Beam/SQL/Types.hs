@@ -86,6 +86,7 @@ data SQLJoinType = SQLInnerJoin
                  | SQLLeftJoin
                  | SQLRightJoin
                  | SQLOuterJoin
+                 | SQLCrossJoin  -- For subqueries that has no ON clause
                    deriving (Show, Eq, Data)
 
 data SQLFrom = SQLFromSource (SQLAliased SQLSource)

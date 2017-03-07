@@ -13,7 +13,7 @@ module Database.Beam.Query.Types
 import Database.Beam.Query.Internal
 
 import Database.Beam.Schema.Tables
-import Database.Beam.SQL
+import Database.Beam.SQL hiding ((<>))
 import Database.HDBC
 
 import Control.Monad.State

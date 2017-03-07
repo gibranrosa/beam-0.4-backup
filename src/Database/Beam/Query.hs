@@ -9,7 +9,7 @@ module Database.Beam.Query
     -- * Run queries in MonadIO
     , beamTxn, insertInto, query, queryList, getOne
     , updateWhere, saveTo
-    , deleteWhere, deleteFrom )
+    , deleteWhere, deleteFrom, hasAutoIncrementConstraint )
     where
 
 import Database.Beam.Query.Types
@@ -18,7 +18,8 @@ import Database.Beam.Query.Internal
 
 import Database.Beam.Schema
 import Database.Beam.Internal
-import Database.Beam.SQL
+--import Database.Beam.SQL
+import Database.Beam.SQL.Types
 
 import Control.Arrow
 import Control.Monad.Trans
@@ -37,10 +38,10 @@ import Database.HDBC
 
 -- * Query
 
-runSQL' :: IConnection conn => Bool -> conn -> SQLCommand -> IO (Either String (IO (Maybe [SqlValue])))
-runSQL' debug conn cmd = do
-  let (sql, vals) = ppSQL cmd
-  when debug (putStrLn ("Will execute " ++ sql ++ " with " ++ show vals))
+runSQL' :: IConnection conn => Beam d m -> conn -> SQLCommand -> IO (Either String (IO (Maybe [SqlValue])))
+runSQL' beam conn cmd = do
+  let (sql, vals) = ppSQL beam cmd
+  when (beamDebug beam) (putStrLn ("Will execute " ++ sql ++ " with " ++ show vals))
   stmt <- prepare conn sql
   _ <- execute stmt vals
   return (Right (fetchRow stmt))
@@ -55,7 +56,7 @@ runInsert :: (MonadIO m, Table table, FromSqlValues (table Identity)) => T.Text 
 runInsert tableName (table :: table Identity) beam =
     do let insertCmd = Insert sqlInsert
            sqlInsert@(SQLInsert tblName sqlValues) = insertToSQL tableName table
-       _ <- withHDBCConnection beam (\conn -> liftIO (runSQL' (beamDebug beam) conn insertCmd))
+       _ <- withHDBCConnection beam (\conn -> liftIO (runSQL' beam conn insertCmd))
 
        -- There are three possibilities here:
        --
@@ -67,16 +68,16 @@ runInsert tableName (table :: table Identity) beam =
        --   * we have autoincrement keys, and some of the fields were marked null.
        --     In this case, we need to ask the backend for the last inserted row.
        let tableSchema = reifyTableSchema (Proxy :: Proxy table)
-
-           autoIncrementsAreNull = zipWith (\(_, columnSchema) value -> hasAutoIncrementConstraint columnSchema && value == SqlNull) tableSchema sqlValues
-           hasNullAutoIncrements = or autoIncrementsAreNull
-
-           hasAutoIncrementConstraint SQLColumnSchema { csConstraints = cs } = isJust (find (== SQLAutoIncrement) cs)
+           autoIncColsNamesWithNulls = map (\((nameCol, _), _) -> nameCol) $ filter (\((_, columnSchema), value) -> hasAutoIncrementConstraint columnSchema && value == SqlNull) $ zip tableSchema sqlValues
+           hasNullAutoIncrements = autoIncColsNamesWithNulls /= []
 
        insertedValues <- if hasNullAutoIncrements
-                         then getLastInsertedRow beam tblName
+                         then getLastInsertedRow beam tblName autoIncColsNamesWithNulls
                          else return sqlValues
        return (fromSqlValues insertedValues)
+
+hasAutoIncrementConstraint :: SQLColumnSchema -> Bool
+hasAutoIncrementConstraint SQLColumnSchema { csConstraints = cs } = isJust (find (== SQLAutoIncrement) cs)
 
 -- | Insert the given row value into the table specified by the first argument.
 insertInto :: (MonadIO m, Table table, FromSqlValues (table Identity)) =>
@@ -121,7 +122,7 @@ updateWhere (DatabaseTable _ name :: DatabaseTable db tbl) mkAssignments mkWhere
              let updateCmd = Update upd
              in BeamT $ \beam ->
                  withHDBCConnection beam $ \conn ->
-                     do _ <- liftIO (runSQL' (beamDebug beam) conn updateCmd)
+                     do _ <- liftIO (runSQL' beam conn updateCmd)
                         pure (Success ())
 
 -- | Use the 'PrimaryKey' of the given table entry to update the corresponding table row in the
@@ -142,7 +143,7 @@ deleteWhere (DatabaseTable _ name :: DatabaseTable db tbl) mkWhere =
                            where_ -> Just where_ }
     in BeamT $ \beam ->
         withHDBCConnection beam $ \conn ->
-            do _ <- liftIO (runSQL' (beamDebug beam) conn cmd)
+            do _ <- liftIO (runSQL' beam conn cmd)
                pure (Success ())
 
 -- | Delete the entry referenced by the given 'PrimaryKey' in the given table.
@@ -175,7 +176,7 @@ runQuery q beam =
            (_, _, select) = queryToSQL' (toQ q) 0
 
        res <- withHDBCConnection beam $ \conn ->
-                liftIO $ runSQL' (beamDebug beam) conn selectCmd
+                liftIO $ runSQL' beam conn selectCmd
 
        case res of
          Left err -> return (Left err)

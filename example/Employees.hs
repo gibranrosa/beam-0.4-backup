@@ -1,7 +1,7 @@
 module Main where
 
 import Database.Beam
-import Database.Beam.Backend.Sqlite3
+import Database.Beam.Backend.Firebird
 
 import Control.Arrow
 import System.Environment (getArgs, getProgName)
@@ -52,7 +52,7 @@ main = do args <- getArgs
           let sqliteDbPath = case args of
                                [x] -> x
                                _ -> error $ "Usage: " ++ progName ++ " [path to SQLite3 database]"
-          beam <- openDatabaseDebug employeeDb AutoMigrate (Sqlite3Settings sqliteDbPath)
+          beam <- openDatabaseDebug employeeDb DontMigrate (FirebirdSettings sqliteDbPath)
 
           _ <- beamTxn beam $ \(EmployeeDatabase employeesT departmentsT groupsT ordersT) ->
             do mapM_ (insertInto departmentsT) departments
@@ -127,7 +127,10 @@ main = do args <- getArgs
 
                liftIO (putStrLn "\n---- Query 5: All employees in the highest grossing region")
                q5 <- queryList $
-                     do (_, highestGrossingRegion) <- subquery_ $
+                     do 
+                        employee <- all_ employeesT
+                        group <- related_ groupsT (_employeeGroup employee)
+                        (_, highestGrossingRegion) <- subquery_ $
                                                       limit_ 1 $
                                                       orderBy (desc_ . fst) $
                                                       aggregate (sum_ *** group_) $
@@ -136,8 +139,6 @@ main = do args <- getArgs
                                                          group <- related_ groupsT (_employeeGroup employee)
 
                                                          pure (_orderAmount order, _groupLocation group)
-                        employee <- all_ employeesT
-                        group <- related_ groupsT (_employeeGroup employee)
                         guard_ (_groupLocation group ==. highestGrossingRegion)
                         pure employee
                liftIO (mapM_ print q5)

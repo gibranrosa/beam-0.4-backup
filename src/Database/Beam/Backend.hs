@@ -2,7 +2,7 @@ module Database.Beam.Backend where
 
 import Database.Beam.Internal
 import Database.Beam.Schema
-import Database.Beam.SQL.Types
+
 import Database.Beam.SQL
 
 import Control.Arrow
@@ -76,7 +76,7 @@ migrateDB beam actions =
 
          case action of
            MACreateTable name t -> do let stmt = createStmtFor beam name t
-                                          (sql, _) = ppSQL (CreateTable stmt)
+                                          (sql, _) = ppSQL beam $ CreateTable stmt
                                       when (beamDebug beam) (liftIO (putStrLn ("Will run SQL:\n" ++ sql)))
                                       withHDBCConnection beam (\conn -> liftIO $ do runRaw conn sql
                                                                                     commit conn)
@@ -107,16 +107,17 @@ openDatabase' isDebug db strat dbSettings =
 
      return beam'
 
-dumpSchema :: Database db => DatabaseSettings db -> IO ()
-dumpSchema (db :: DatabaseSettings db) =
+dumpSchema :: SQL backend => backend -> Database db => DatabaseSettings db -> IO ()
+dumpSchema b (db :: DatabaseSettings db) =
     do let createTableStmts = allTables (\(DatabaseTable tbl name) -> createStmtFor debugBeam name tbl) db
        putStrLn "Dumping database schema ..."
-       mapM_ (putStrLn . fst . ppSQL . CreateTable) createTableStmts
+       mapM_ (putStrLn . fst . ppSQLGen b . CreateTable) createTableStmts
     where debugBeam ::Beam db Identity
           debugBeam = Beam { beamDbSettings = db
                            , beamDebug = False
                            , closeBeam = return ()
                            , compareSchemas = \_ _ -> Unknown
                            , adjustColDescForBackend = id
-                           , getLastInsertedRow = \_ -> return []
-                           , withHDBCConnection = \_ -> error "trying to run in debug mode" }
+                           , getLastInsertedRow = \_ _-> return []
+                           , withHDBCConnection = \_ -> error "trying to run in debug mode" 
+                           , ppSQL = ppSQLGen b}

@@ -79,10 +79,15 @@ instance IsString (Aggregation s T.Text) where
 instance (Num a, Convertible a SqlValue) => Num (Aggregation s a) where
     fromInteger x = ProjectAgg (SQLValE (convert (fromInteger x :: a)))
     ProjectAgg a + ProjectAgg b = ProjectAgg (SQLBinOpE "+" a b)
+    _ + _ = error "+: Not implemented for GroupAggregation"
     ProjectAgg a - ProjectAgg b = ProjectAgg (SQLBinOpE "-" a b)
+    _ - _ = error "-: Not implemented for GroupAggregation"
     ProjectAgg a * ProjectAgg b = ProjectAgg (SQLBinOpE "*" a b)
+    _ * _ = error "*: Not implemented for GroupAggregation"
     negate (ProjectAgg a) = ProjectAgg (SQLUnOpE "-" a)
+    negate _ = error "negate: Not implemented for GroupAggregation"
     abs (ProjectAgg x) = ProjectAgg (SQLFuncE "ABS" [x])
+    abs _ = error "abs: Not implemented for GroupAggregation"
     signum _ = error "signum: not defined for Aggregation. Use CASE...WHEN"
 
 -- * Sql Projections

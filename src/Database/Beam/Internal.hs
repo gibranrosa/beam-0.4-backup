@@ -44,9 +44,10 @@ data Beam d m = Beam
               , compareSchemas :: ReifiedDatabaseSchema -> DatabaseSettings d -> DBSchemaComparison
               , adjustColDescForBackend :: SQLColumnSchema -> SQLColumnSchema
 
-              , getLastInsertedRow :: Text -> m [SqlValue]
+              , getLastInsertedRow :: Text -> [Text] -> m [SqlValue]
 
-              , withHDBCConnection :: forall a. (forall conn. IConnection conn => conn -> m a) -> m a }
+              , withHDBCConnection :: forall a. (forall conn. IConnection conn => conn -> m a) -> m a 
+              , ppSQL :: SQLCommand -> (String, [SqlValue])}
 
 newtype BeamT e d m a = BeamT { runBeamT :: Beam d m -> m (BeamResult e a) }
 
@@ -61,7 +62,7 @@ data BeamRollbackReason e = InternalError String
 transBeam :: Functor m => (forall a. (s -> m (a, Maybe b)) -> n a) -> (forall a. n a -> s -> m (a, b)) -> Beam d m -> Beam d n
 transBeam liftB lower beam = beam
                           { closeBeam = liftB (const ((,Nothing) <$> closeBeam beam))
-                          , getLastInsertedRow = \s -> liftB (const ((, Nothing) <$> getLastInsertedRow beam s))
+                          , getLastInsertedRow = \s t -> liftB (const ((, Nothing) <$> getLastInsertedRow beam s t))
                           , withHDBCConnection = \f -> liftB (\s -> second Just <$> withHDBCConnection beam (flip lower s . f)) }
 
 instance Monad m => Monad (BeamT e d m) where
