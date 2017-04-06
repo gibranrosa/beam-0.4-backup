@@ -1,4 +1,4 @@
-module Database.Beam.Backend.Firebird where
+module Database.Beam.Backend.Firebird (FirebirdSettings(..), Decimal) where
 
 import Database.Beam.Internal
 import Database.Beam.Query
@@ -9,11 +9,14 @@ import Database.Beam.SQL
 
 import Control.Monad.Trans
 
+import Database.Beam.Schema.Fields
 import Database.HDBC.ODBC
 import Database.HDBC
 
+import Data.ByteString.Char8 (pack, ByteString)
+--import qualified  Data.ByteString as BS
 import Data.Text (Text, unpack)
-
+import Data.Decimal
 -- * Sqlite3 support
 
 newtype FirebirdSettings = FirebirdSettings String
@@ -69,3 +72,30 @@ instance SQL FirebirdSettings where
   ppFieldName _ (SQLQualifiedFieldName t table) = pure (text "" <> text (unpack table) <> text "." <>
                                                        text (unpack t) <> text "")
   ppFieldName _ (SQLFieldName t) = pure (text (unpack t))
+
+
+numSchema :: Int -> FieldSchema Decimal
+numSchema dec = FieldSchema {
+    fsColDesc = notNull
+      SqlColDesc{colType = SqlNumericT, colSize = Just 15,
+                colOctetLength = Nothing, colDecDigits = Just dec,
+                colNullable = Nothing}
+  , fsHumanReadable = "numSchema"
+  , fsMakeSqlValue = SqlByteString . pack . show
+  , fsFromSqlValue = (read . fromSql) <$> popSqlValue }
+instance HasDefaultFieldSchema Decimal where
+    defFieldSchema = numSchema 6
+instance FromSqlValues Decimal
+
+binarySchema :: FieldSchema ByteString
+binarySchema = FieldSchema {
+    fsColDesc = notNull
+      SqlColDesc{colType = SqlLongVarBinaryT, colSize = Nothing,
+                colOctetLength = Nothing, colDecDigits = Nothing,
+                colNullable = Nothing}
+  , fsHumanReadable = "binarySchema"
+  , fsMakeSqlValue = SqlByteString
+  , fsFromSqlValue = fromSql <$> popSqlValue }
+instance HasDefaultFieldSchema ByteString where
+    defFieldSchema = binarySchema
+instance FromSqlValues ByteString
